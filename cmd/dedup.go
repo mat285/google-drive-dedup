@@ -13,7 +13,6 @@ type data struct {
 	queue chan string
 	dups  chan string
 	errs  chan error
-	stop  chan interface{}
 
 	hashes map[string]string
 	lock   *sync.Mutex
@@ -49,7 +48,6 @@ func dedupDrive(directory *string, delete *bool) error {
 		queue: make(chan string, len(items)),
 		dups:  make(chan string, len(items)),
 		errs:  make(chan error, len(items)),
-		stop:  make(chan interface{}, threads),
 
 		hashes: make(map[string]string),
 		lock:   new(sync.Mutex),
@@ -60,18 +58,19 @@ func dedupDrive(directory *string, delete *bool) error {
 	for _, f := range items {
 		d.queue <- f
 	}
+	close(d.queue)
 
 	for i := 0; i < threads; i++ {
 		d.wg.Add(1)
 		go work(d)
 	}
-	go checker(d)
 	d.wg.Wait()
 
 	dups := printInfo(d)
 
 	if delete == nil || !*delete {
 		fmt.Println("To delete the duplicate files run with --delete=true")
+		return nil
 	}
 
 	for _, d := range dups {
@@ -101,57 +100,37 @@ func printInfo(d *data) []string {
 	return dups
 }
 
-func checker(d *data) {
-	for {
-		if len(d.queue) == 0 {
-			d.stop <- nil
-			return
-		}
-	}
-}
-
 func work(d *data) {
 	defer d.wg.Done()
-	for {
-		if len(d.queue) == 0 {
-			d.stop <- nil
-			return
-		}
-		select {
-		case item := <-d.queue:
-			fmt.Println("Processing file:", item)
-			if len(d.queue) == 0 {
-				d.stop <- nil
-			}
-			f, err := os.Open(item)
-			if err != nil {
-				fmt.Printf("Error with file %s : %v\n", item, err)
-				d.errs <- err
-				f.Close()
-			}
-			hash, err := hashFile(f)
-			if err != nil {
-				fmt.Printf("Error with file %s : %v\n", item, err)
-				d.errs <- err
-				f.Close()
-			}
-			fmt.Printf("File %s hash %s\n", item, string(hash))
-			dup := false
-			d.lock.Lock()
-			if p, has := d.hashes[string(hash)]; has && p != "" {
-				dup = true
-			} else {
-				d.hashes[string(hash)] = item
-			}
-			d.lock.Unlock()
-			if dup {
-				d.dups <- item
-			}
+	for item := range d.queue {
+		fmt.Println("Processing file:", item)
+		f, err := os.Open(item)
+		if err != nil {
+			fmt.Printf("Error with file %s : %v\n", item, err)
+			d.errs <- err
 			f.Close()
-			continue
-		case <-d.stop:
-			return
 		}
+		hash, err := hashFile(f)
+		if err != nil {
+			fmt.Printf("Error with file %s : %v\n", item, err)
+			d.errs <- err
+			f.Close()
+		}
+		fmt.Printf("File %s hash %s\n", item, string(hash))
+		dup := false
+		d.lock.Lock()
+		if p, has := d.hashes[string(hash)]; has && p != "" {
+			dup = true
+		} else {
+			d.hashes[string(hash)] = item
+		}
+		d.lock.Unlock()
+		if dup {
+			d.dups <- item
+		}
+		f.Close()
+		fmt.Println("Done processing", item)
+		continue
 	}
 }
 
