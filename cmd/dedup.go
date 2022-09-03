@@ -21,6 +21,10 @@ type data struct {
 	wg *sync.WaitGroup
 }
 
+const (
+	threads = 16
+)
+
 func dedupDrive(directory *string, delete *bool) error {
 	if directory == nil || len(*directory) == 0 {
 		return fmt.Errorf("Must specify --directory")
@@ -45,7 +49,7 @@ func dedupDrive(directory *string, delete *bool) error {
 		queue: make(chan string, len(items)),
 		dups:  make(chan string, len(items)),
 		errs:  make(chan error, len(items)),
-		stop:  make(chan interface{}),
+		stop:  make(chan interface{}, threads),
 
 		hashes: make(map[string]string),
 		lock:   new(sync.Mutex),
@@ -53,10 +57,15 @@ func dedupDrive(directory *string, delete *bool) error {
 		wg: new(sync.WaitGroup),
 	}
 
-	for i := 0; i < 16; i++ {
+	for _, f := range items {
+		d.queue <- f
+	}
+
+	for i := 0; i < threads; i++ {
 		d.wg.Add(1)
 		go work(d)
 	}
+	go checker(d)
 	d.wg.Wait()
 
 	dups := printInfo(d)
@@ -92,29 +101,41 @@ func printInfo(d *data) []string {
 	return dups
 }
 
+func checker(d *data) {
+	for {
+		if len(d.queue) == 0 {
+			d.stop <- nil
+			return
+		}
+	}
+}
+
 func work(d *data) {
 	defer d.wg.Done()
 	for {
 		if len(d.queue) == 0 {
-			close(d.stop)
+			d.stop <- nil
 			return
 		}
 		select {
 		case item := <-d.queue:
+			fmt.Println("Processing file:", item)
 			if len(d.queue) == 0 {
-				close(d.stop)
-				return
+				d.stop <- nil
 			}
 			f, err := os.Open(item)
 			if err != nil {
+				fmt.Printf("Error with file %s : %v\n", item, err)
 				d.errs <- err
 				f.Close()
 			}
 			hash, err := hashFile(f)
 			if err != nil {
+				fmt.Printf("Error with file %s : %v\n", item, err)
 				d.errs <- err
 				f.Close()
 			}
+			fmt.Printf("File %s hash %s\n", item, string(hash))
 			dup := false
 			d.lock.Lock()
 			if p, has := d.hashes[string(hash)]; has && p != "" {
